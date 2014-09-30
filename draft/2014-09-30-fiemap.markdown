@@ -1,0 +1,105 @@
+---
+layout: post
+title: "fiemap"
+date: 2014-09-30 12:36:08 +0800
+comments: true
+categories: 
+---
+
+Today when review patch, I found there is bug about glance download the image,
+after convert the image into raw format, the image file corrupted.
+
+There is the bug https://bugs.launchpad.net/nova/+bug/1350766, and fix:
+https://review.openstack.org/#/c/123957/3
+
+As the commit message said, this is bug of qemu-img. It's about using wrong
+flag with fiemap.
+
+So let me try learn something about fiemap.
+
+Extents based filesystem
+========================
+First, we should understand extents.
+
+There are some good document about extents:
+
+http://digital-forensics.sans.org/blog/2010/12/20/digital-forensics-understanding-ext4-part-1-extents
+http://blog.csdn.net/younger_china/article/details/7075751
+http://pages.cs.wisc.edu/~remzi/Classes/537/Fall2011/Projects/p5.html
+http://www.linux.org/threads/intro-to-extents.4131/
+
+Basically, extents is used by to indicate how a file store in physical disk. Old
+filesystem use bitmap to mark which block used by a file. But when the file begin
+to big, this way is not scalability. Extent is a set of continuous blocks, new
+filesystem only record how many extent used by file, and each extent start from
+which block.
+
+
+Fiemap
+======
+fiemap is system call for get extents info for a file. There is doc from kernel doc:
+https://www.kernel.org/doc/Documentation/filesystems/fiemap.txt
+
+Also some demo code to show how to use fiemap:
+http://kernel.ubuntu.com/git?p=cking/debug-code/.git;a=blob;f=fiemap/fiemap.c;h=df2df3e8683454ac93ac2b51b5d692db3197f477;hb=HEAD
+
+I don't know how qemu-img works, but I guess qemu use fiemap to operate sparse file.
+http://stackoverflow.com/questions/2563305/how-to-check-if-the-block-is-present-in-a-sparse-file-for-simple-copy-on-write
+
+Let see some example:
+
+We create 200M empty file:
+soulxu@soulxu-ThinkPad-T410:~$ dd if=/dev/zero of=test1.img bs=1 count=0 skip=200M
+0+0 records in
+0+0 records out
+0 bytes (0 B) copied, 0.000252909 s, 0.0 kB/s
+
+We will find there isn't any extents allocate for it.
+soulxu@soulxu-ThinkPad-T410:~$ filefrag test1.img
+test1.img: 0 extents found
+
+Let's try allocate block for whole file:
+soulxu@soulxu-ThinkPad-T410:~$ fallocate -l 200M ./test1.img 
+
+soulxu@soulxu-ThinkPad-T410:~$ filefrag -v test1.img
+Filesystem type is: ef53
+File size of test1.img is 209715200 (51200 blocks of 4096 bytes)
+ ext:     logical_offset:        physical_offset: length:   expected: flags:
+   0:        0..    2047:    9168896..   9170943:   2048:             unwritten
+   1:     2048..    4095:    9170944..   9172991:   2048:             unwritten
+   2:     4096..    6143:    9172992..   9175039:   2048:             unwritten
+   3:     6144..    8191:    9175040..   9177087:   2048:             unwritten
+   4:     8192..   10239:    9177088..   9179135:   2048:             unwritten
+   5:    10240..   12287:    9179136..   9181183:   2048:             unwritten
+   6:    12288..   14335:    9181184..   9183231:   2048:             unwritten
+   7:    14336..   16383:    9183232..   9185279:   2048:             unwritten
+   8:    16384..   18431:    9185280..   9187327:   2048:             unwritten
+   9:    18432..   20479:    9187328..   9189375:   2048:             unwritten
+  10:    20480..   22527:    9189376..   9191423:   2048:             unwritten
+  11:    22528..   24575:    9191424..   9193471:   2048:             unwritten
+  12:    24576..   26623:    9193472..   9195519:   2048:             unwritten
+  13:    26624..   28671:    9195520..   9197567:   2048:             unwritten
+  14:    28672..   30719:    9197568..   9199615:   2048:             unwritten
+  15:    30720..   32767:    9199616..   9201663:   2048:             unwritten
+  16:    32768..   34815:    9201664..   9203711:   2048:             unwritten
+  17:    34816..   36863:    9203712..   9205759:   2048:             unwritten
+  18:    36864..   38911:    9205760..   9207807:   2048:             unwritten
+  19:    38912..   40959:    9207808..   9209855:   2048:             unwritten
+  20:    40960..   43007:    9209856..   9211903:   2048:             unwritten
+  21:    43008..   45055:    9211904..   9213951:   2048:             unwritten
+  22:    45056..   47103:    9213952..   9215999:   2048:             unwritten
+  23:    47104..   49151:    9216000..   9218047:   2048:             unwritten
+  24:    49152..   51199:    9218048..   9220095:   2048:             unwritten,eof
+
+
+And let see just allocate half of file:
+soulxu@soulxu-ThinkPad-T410:~$ fallocate -o 100M -l 100M ./test2.img 
+
+soulxu@soulxu-ThinkPad-T410:~$ filefrag -v test2.img 
+Filesystem type is: ef53
+File size of test2.img is 209715200 (51200 blocks of 4096 bytes)
+ ext:     logical_offset:        physical_offset: length:   expected: flags:
+   0:    25600..   51199:   18251776..  18277375:  25600:             unwritten,eof
+test2.img: 1 extent found
+
+
